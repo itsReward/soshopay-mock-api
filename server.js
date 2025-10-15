@@ -72,12 +72,45 @@ function normalizeZimbabwePhone(mobile) {
         normalized = '0' + normalized.substring(4);
     } else if (normalized.startsWith('263')) {
         normalized = '0' + normalized.substring(3);
-    } else if (!normalized.startsWith('0') && normalized.length === 9) {
+    } else if (!normalized.startsWith('0')) {
         normalized = '0' + normalized;
     }
 
     return normalized;
 }
+
+// Helper function to convert date string to timestamp
+function dateToTimestamp(dateString) {
+    if (!dateString) return null;
+    return new Date(dateString).getTime();
+}
+
+// Helper function to map loan_type string to LoanType enum format
+function mapLoanType(loanType) {
+    // Map snake_case to UPPERCASE enum
+    const typeMap = {
+        'cash': 'CASH',
+        'paygo': 'PAYGO',
+        'pay_go': 'PAYGO'
+    };
+    return typeMap[loanType] || loanType.toUpperCase();
+}
+
+// Helper function to map status code to PaymentStatus enum
+function mapPaymentStatus(statusCode) {
+    const statusMap = {
+        0: 'PENDING',
+        1: 'PROCESSING',
+        2: 'COMPLETED',
+        3: 'OVERDUE',
+        4: 'FAILED',
+        5: 'CANCELLED',
+        6: 'CURRENT'
+    };
+    return statusMap[statusCode] || 'PENDING';
+}
+
+// ========== AUTH ENDPOINTS ==========
 
 // Login endpoint
 server.post('/api/mobile/client/login', (req, res) => {
@@ -86,41 +119,23 @@ server.post('/api/mobile/client/login', (req, res) => {
     if (!mobile || !pin) {
         return res.status(400).json({
             error: 'Validation Error',
-            message: 'Mobile and PIN are required'
+            message: 'Mobile number and PIN are required'
         });
     }
 
-    // Normalize the incoming phone number
     const normalizedMobile = normalizeZimbabwePhone(mobile);
-
     const db = router.db;
+    const client = db.get('clients').find({ mobile: normalizedMobile }).value();
 
-    // Try to find client by normalized mobile number
-    const client = db.get('clients').find(c => {
-        const clientMobile = normalizeZimbabwePhone(c.mobile);
-        return clientMobile === normalizedMobile;
-    }).value();
-
-    if (!client) {
-        console.log(`[LOGIN] Client not found for mobile: ${mobile} (normalized: ${normalizedMobile})`);
-        return res.status(404).json({
-            error: 'Not Found',
-            message: 'Client not found'
-        });
-    }
-
-    if (client.pin !== pin) {
-        console.log(`[LOGIN] Invalid PIN for client: ${client.id}`);
+    if (!client || client.pin !== pin) {
         return res.status(401).json({
             error: 'Unauthorized',
-            message: 'Invalid PIN'
+            message: 'Invalid mobile number or PIN'
         });
     }
 
     const accessToken = `mock_access_token_${client.id}_${Date.now()}`;
     const refreshToken = `mock_refresh_token_${client.id}_${Date.now()}`;
-
-    console.log(`[LOGIN] Successful login for client: ${client.id} (${client.first_name} ${client.last_name})`);
 
     res.status(200).json({
         access_token: accessToken,
@@ -128,12 +143,13 @@ server.post('/api/mobile/client/login', (req, res) => {
         access_expires_at: new Date(Date.now() + 3600000).toISOString(),
         refresh_token: refreshToken,
         refresh_expires_at: new Date(Date.now() + 86400000).toISOString(),
-        device_id: req.headers['x-device-id'] || 'unknown',
+        device_id: 'mock_device_001',
         client: {
             id: client.id,
             first_name: client.first_name,
             last_name: client.last_name,
-            mobile: client.mobile
+            mobile: client.mobile,
+            email: client.email
         }
     });
 });
@@ -145,7 +161,7 @@ server.post('/api/mobile/client/set-pin', (req, res) => {
     if (!mobile || !new_pin || !confirm_pin) {
         return res.status(400).json({
             error: 'Validation Error',
-            message: 'Mobile, new_pin, and confirm_pin are required'
+            message: 'All fields are required'
         });
     }
 
@@ -156,50 +172,24 @@ server.post('/api/mobile/client/set-pin', (req, res) => {
         });
     }
 
-    if (new_pin.length !== 4 || !/^\d+$/.test(new_pin)) {
-        return res.status(400).json({
-            error: 'Validation Error',
-            message: 'PIN must be 4 digits'
-        });
-    }
-
-    // Normalize the incoming phone number
     const normalizedMobile = normalizeZimbabwePhone(mobile);
-
     const db = router.db;
-
-    // Try to find client by normalized mobile number
-    const client = db.get('clients').find(c => {
-        const clientMobile = normalizeZimbabwePhone(c.mobile);
-        return clientMobile === normalizedMobile;
-    }).value();
+    const client = db.get('clients').find({ mobile: normalizedMobile }).value();
 
     if (!client) {
-        console.log(`[SET-PIN] Client not found for mobile: ${mobile} (normalized: ${normalizedMobile})`);
         return res.status(404).json({
             error: 'Not Found',
             message: 'Client not found'
         });
     }
 
-    // Update PIN
-    db.get('clients').find({ id: client.id }).assign({ pin: new_pin }).write();
-
-    const token = `mock_token_${client.id}_${Date.now()}`;
-
-    console.log(`[SET-PIN] PIN set successfully for client: ${client.id}`);
+    db.get('clients')
+        .find({ mobile: normalizedMobile })
+        .assign({ pin: new_pin })
+        .write();
 
     res.status(200).json({
-        token,
-        token_type: 'Bearer',
-        expires_at: new Date(Date.now() + 3600000).toISOString(),
-        expires_in: 3600,
-        client: {
-            id: client.id,
-            first_name: client.first_name,
-            last_name: client.last_name,
-            mobile: client.mobile
-        }
+        message: 'PIN set successfully'
     });
 });
 
@@ -207,14 +197,7 @@ server.post('/api/mobile/client/set-pin', (req, res) => {
 server.post('/api/mobile/client/refresh-token', (req, res) => {
     const { refresh_token } = req.body;
 
-    if (!refresh_token) {
-        return res.status(400).json({
-            error: 'Validation Error',
-            message: 'Refresh token is required'
-        });
-    }
-
-    if (refresh_token === 'invalid' || refresh_token === 'expired') {
+    if (!refresh_token || refresh_token === 'expired' || refresh_token === 'invalid') {
         return res.status(401).json({
             error: 'Unauthorized',
             message: 'Invalid or expired refresh token'
@@ -294,6 +277,8 @@ server.post('/api/mobile/client/pin', (req, res) => {
     });
 });
 
+// ========== LOAN ENDPOINTS ==========
+
 // Get client loans
 server.get('/api/mobile/client/loans', (req, res) => {
     const { status } = req.query;
@@ -307,6 +292,284 @@ server.get('/api/mobile/client/loans', (req, res) => {
 
     res.status(200).json({
         loans
+    });
+});
+
+// ========== CASH LOAN ENDPOINTS ==========
+
+// Get Cash Loan Form Data
+server.get('/api/loans/cash/form-data', (req, res) => {
+    res.status(200).json({
+        repaymentPeriods: [
+            "1 month",
+            "2 months",
+            "3 months",
+            "4 months",
+            "5 months",
+            "6 months",
+            "7 months",
+            "8 months",
+            "9 months",
+            "10 months",
+            "11 months",
+            "1 year",
+            "18 months",
+            "2 years"
+        ],
+        loanPurposes: [
+            "Business Expansion",
+            "Working Capital",
+            "Equipment Purchase",
+            "Inventory",
+            "Home Improvement",
+            "Education",
+            "Medical Expenses",
+            "Debt Consolidation",
+            "Emergency",
+            "Other"
+        ],
+        employerIndustries: [
+            "Agriculture",
+            "Mining",
+            "Manufacturing",
+            "Construction",
+            "Retail",
+            "Wholesale",
+            "Transport",
+            "Hospitality",
+            "Finance",
+            "Insurance",
+            "Real Estate",
+            "Technology",
+            "Telecommunications",
+            "Healthcare",
+            "Education",
+            "Government",
+            "NGO",
+            "Self-Employed",
+            "Other"
+        ],
+        minLoanAmount: 100.0,
+        maxLoanAmount: 50000.0,
+        minCollateralValue: 200.0
+    });
+});
+
+// Calculate Cash Loan Terms
+server.post('/api/loans/cash/calculate', (req, res) => {
+    const { loanAmount, repaymentPeriod, employerIndustry, collateralValue, monthlyIncome } = req.body;
+
+    if (!loanAmount || !repaymentPeriod || !employerIndustry || !collateralValue || !monthlyIncome) {
+        return res.status(400).json({
+            error: 'Validation Error',
+            message: 'All fields are required for calculation'
+        });
+    }
+
+    // Extract number of months from repayment period
+    const monthsMatch = repaymentPeriod.match(/(\d+)/);
+    const months = monthsMatch ? parseInt(monthsMatch[1]) : 12;
+    const isYear = repaymentPeriod.includes('year');
+    const totalMonths = isYear ? months * 12 : months;
+
+    // Calculate interest rate based on amount and period
+    let interestRate = 15.0; // Base rate
+    if (loanAmount > 10000) interestRate = 12.0;
+    if (loanAmount > 25000) interestRate = 10.0;
+    if (totalMonths > 12) interestRate -= 1.0;
+    if (totalMonths > 18) interestRate -= 0.5;
+
+    // Calculate terms
+    const principalAmount = parseFloat(loanAmount);
+    const totalInterest = (principalAmount * interestRate * totalMonths) / (100 * 12);
+    const totalAmount = principalAmount + totalInterest;
+    const monthlyPayment = totalAmount / totalMonths;
+
+    res.status(200).json({
+        principalAmount: principalAmount,
+        interestRate: interestRate,
+        interestAmount: parseFloat(totalInterest.toFixed(2)),
+        totalAmount: parseFloat(totalAmount.toFixed(2)),
+        monthlyPayment: parseFloat(monthlyPayment.toFixed(2)),
+        numberOfPayments: totalMonths,
+        firstPaymentDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        lastPaymentDate: new Date(Date.now() + totalMonths * 30 * 24 * 60 * 60 * 1000).toISOString(),
+        processingFee: parseFloat((principalAmount * 0.02).toFixed(2)),
+        insuranceFee: parseFloat((principalAmount * 0.01).toFixed(2)),
+        totalFees: parseFloat((principalAmount * 0.03).toFixed(2)),
+        ltvRatio: parseFloat(((principalAmount / collateralValue) * 100).toFixed(2)),
+        approvalProbability: collateralValue >= principalAmount * 1.5 ? "High" : "Medium",
+        disbursementMethod: "Bank Transfer",
+        estimatedDisbursementTime: "2-3 business days"
+    });
+});
+
+// Submit Cash Loan Application
+server.post('/api/loans/cash/apply', (req, res) => {
+    const application = req.body;
+
+    if (!application.loanAmount || !application.repaymentPeriod || !application.loanPurpose) {
+        return res.status(400).json({
+            error: 'Validation Error',
+            message: 'Required fields missing'
+        });
+    }
+
+    const applicationId = `APP${Date.now()}`;
+
+    res.status(201).json({
+        applicationId: applicationId,
+        statusId: "SUBMITTED",
+        message: "Your cash loan application has been submitted successfully. We'll review it within 24-48 hours.",
+        referenceNumber: `REF${Date.now()}`,
+        estimatedReviewTime: "24-48 hours",
+        nextSteps: [
+            "Application review by loan officer",
+            "Collateral verification",
+            "Credit assessment",
+            "Final approval decision"
+        ]
+    });
+});
+
+// Upload Collateral Document
+server.post('/api/loans/cash/collateral/upload', (req, res) => {
+    // Simulate document upload
+    const documentId = `DOC${Date.now()}`;
+
+    res.status(200).json({
+        documentId: documentId,
+        url: `https://mock-storage.soshopay.com/documents/${documentId}`,
+        fileName: req.body.fileName || 'collateral_document.pdf',
+        fileSize: req.body.fileSize || '2.5 MB',
+        uploadDate: new Date().toISOString(),
+        status: "uploaded",
+        message: "Document uploaded successfully"
+    });
+});
+
+// ========== PAYGO LOAN ENDPOINTS ==========
+
+// Get PayGo Categories
+server.get('/api/loans/paygo/categories', (req, res) => {
+    res.status(200).json({
+        categories: [
+            "Solar Panels",
+            "Solar Kits",
+            "Batteries",
+            "Inverters",
+            "Smartphones",
+            "Laptops",
+            "Tablets",
+            "Home Appliances",
+            "Farming Equipment",
+            "Other Electronics"
+        ]
+    });
+});
+
+// Get PayGo Products by Category
+server.get('/api/loans/paygo/products', (req, res) => {
+    const { category } = req.query;
+
+    // Mock products - in real API, filter by category
+    const products = [
+        {
+            id: "PROD001",
+            name: "Solar Panel 100W",
+            category: "Solar Panels",
+            description: "High-efficiency 100W solar panel with 25-year warranty",
+            retailPrice: 350.0,
+            paygoPrice: 420.0,
+            dailyRate: 2.5,
+            minPeriod: 6,
+            maxPeriod: 24,
+            imageUrl: "https://example.com/solar-100w.jpg",
+            specifications: {
+                power: "100W",
+                voltage: "12V",
+                warranty: "25 years"
+            },
+            inStock: true
+        },
+        {
+            id: "PROD002",
+            name: "Solar Kit 200W",
+            category: "Solar Kits",
+            description: "Complete solar kit with 200W panel, battery, and inverter",
+            retailPrice: 800.0,
+            paygoPrice: 960.0,
+            dailyRate: 5.0,
+            minPeriod: 12,
+            maxPeriod: 36,
+            imageUrl: "https://example.com/solar-kit-200w.jpg",
+            specifications: {
+                power: "200W",
+                batteryCapacity: "100Ah",
+                inverter: "1000W"
+            },
+            inStock: true
+        }
+    ];
+
+    const filteredProducts = category
+        ? products.filter(p => p.category === category)
+        : products;
+
+    res.status(200).json({
+        products: filteredProducts,
+        total: filteredProducts.length
+    });
+});
+
+// Calculate PayGo Loan Terms
+server.post('/api/loans/paygo/calculate', (req, res) => {
+    const { productId, usagePerDay, repaymentPeriod, salaryBand } = req.body;
+
+    if (!productId || !usagePerDay || !repaymentPeriod || !salaryBand) {
+        return res.status(400).json({
+            error: 'Validation Error',
+            message: 'All fields are required for PayGo calculation'
+        });
+    }
+
+    // Mock calculation
+    const productPrice = 420.0;
+    const dailyUsage = parseFloat(usagePerDay);
+    const months = parseInt(repaymentPeriod);
+
+    const dailyPayment = (productPrice / (months * 30)) * 1.15; // 15% markup
+    const totalAmount = dailyPayment * months * 30;
+
+    res.status(200).json({
+        productPrice: productPrice,
+        dailyPayment: parseFloat(dailyPayment.toFixed(2)),
+        monthlyPayment: parseFloat((dailyPayment * 30).toFixed(2)),
+        totalAmount: parseFloat(totalAmount.toFixed(2)),
+        interestAmount: parseFloat((totalAmount - productPrice).toFixed(2)),
+        numberOfPayments: months * 30,
+        estimatedSavings: parseFloat((dailyUsage * 0.5 * months * 30).toFixed(2))
+    });
+});
+
+// Submit PayGo Loan Application
+server.post('/api/loans/paygo/apply', (req, res) => {
+    const application = req.body;
+
+    if (!application.productId || !application.usagePerDay || !application.repaymentPeriod) {
+        return res.status(400).json({
+            error: 'Validation Error',
+            message: 'Required fields missing'
+        });
+    }
+
+    const applicationId = `PAYGO${Date.now()}`;
+
+    res.status(201).json({
+        applicationId: applicationId,
+        statusId: "SUBMITTED",
+        message: "Your PayGo loan application has been submitted successfully.",
+        referenceNumber: `REF${Date.now()}`
     });
 });
 
@@ -350,35 +613,82 @@ server.get('/api/mobile/client/loans/settled/:id', (req, res) => {
     res.status(200).json({ settled_loan: settledLoan });
 });
 
-// Payment dashboard
+// ========== PAYMENT ENDPOINTS ==========
+
+// Payment dashboard - FIXED to match domain model expectations
 server.get('/api/payments/dashboard', (req, res) => {
     const db = router.db;
     const loans = db.get('loans').value();
     const payments = db.get('payments').value();
 
+    // Calculate totals
     const totalOutstanding = loans.reduce((sum, loan) => sum + loan.outstanding_balance, 0);
-    const overdueLoans = loans.filter(loan => loan.status === 2 || new Date(loan.next_payment_date) < new Date());
-    const overdueAmount = overdueLoans.reduce((sum, loan) => sum + loan.next_payment_amount, 0);
 
-    const recentPayments = payments.slice(-5).reverse();
+    // Find overdue loans (status 3 = OVERDUE or past due date)
+    const overdueLoans = loans.filter(loan => {
+        if (loan.next_payment_date) {
+            const dueDate = new Date(loan.next_payment_date);
+            return dueDate < new Date();
+        }
+        return false;
+    });
+    const overdueAmount = overdueLoans.reduce((sum, loan) => sum + (loan.next_payment_amount || 0), 0);
 
-    res.status(200).json({
-        total_outstanding: totalOutstanding,
-        next_payment_amount: loans[0]?.next_payment_amount || 0,
-        next_payment_date: loans[0]?.next_payment_date || null,
-        overdue_amount: overdueAmount,
-        overdue_count: overdueLoans.length,
-        payment_summaries: loans.map(loan => ({
-            loan_id: loan.id,
-            loan_type: loan.loan_type,
-            product_name: loan.product_name,
-            amount_due: loan.next_payment_amount,
-            due_date: loan.next_payment_date,
-            status: loan.status,
-            days_until_due: Math.ceil((new Date(loan.next_payment_date) - new Date()) / (1000 * 60 * 60 * 24)),
+    // Get next payment info from active loans
+    const activeLoans = loans.filter(loan => loan.status === 3 && loan.next_payment_date);
+    const nextPaymentLoan = activeLoans.sort((a, b) =>
+        new Date(a.next_payment_date) - new Date(b.next_payment_date)
+    )[0];
+
+    // Map payment summaries to match domain model (camelCase + correct types)
+    const paymentSummaries = loans.map(loan => {
+        const dueDate = loan.next_payment_date ? new Date(loan.next_payment_date) : null;
+        const today = new Date();
+        const daysUntilDue = dueDate ? Math.ceil((dueDate - today) / (1000 * 60 * 60 * 24)) : 0;
+
+        return {
+            loanId: loan.id,
+            loanType: mapLoanType(loan.loan_type),
+            productName: loan.product_name || null,
+            amountDue: loan.next_payment_amount || 0,
+            //dueDate: dueDate ? dueDate.getTime() : null, // Convert to timestamp (Long)
+            dueDate: loan.dueDate || 0, // Convert to timestamp (Long)
+            status: mapPaymentStatus(loan.status),
+            daysUntilDue: daysUntilDue,
+            daysOverdue: daysUntilDue < 0 ? Math.abs(daysUntilDue) : 0,
             penalties: loan.penalties || 0
-        })),
-        recent_payments: recentPayments
+        };
+    });
+
+    // Map recent payments to match domain model (camelCase + correct types)
+    const recentPayments = payments.slice(-5).reverse().map(payment => ({
+        id: payment.id,
+        userId: payment.client_id,
+        loanId: payment.loan_id,
+        paymentId: payment.payment_id,
+        amount: payment.amount,
+        method: payment.method,
+        phoneNumber: payment.phone_number,
+        receiptNumber: payment.receipt_number,
+        status: mapPaymentStatus(payment.status === 'completed' ? 2 : 0), // Map string to enum
+        processedAt: dateToTimestamp(payment.processed_at),
+        failureReason: payment.failure_reason || null,
+        createdAt: dateToTimestamp(payment.created_at),
+        principal: payment.principal || null,
+        interest: payment.interest || null,
+        penalties: payment.penalties || null,
+        updatedAt: dateToTimestamp(payment.processed_at) // Use processed_at as updatedAt
+    }));
+
+    // Return response with camelCase and correct types
+    res.status(200).json({
+        totalOutstanding: totalOutstanding,
+        nextPaymentAmount: nextPaymentLoan?.next_payment_amount || 0,
+        nextPaymentDate: nextPaymentLoan?.next_payment_date ? dateToTimestamp(nextPaymentLoan.next_payment_date) : 0,
+        overdueAmount: overdueAmount,
+        overdueCount: overdueLoans.length,
+        paymentSummaries: paymentSummaries,
+        recentPayments: recentPayments
     });
 });
 
@@ -390,15 +700,32 @@ server.get('/api/payments/history', (req, res) => {
 
     const start = (page - 1) * limit;
     const end = start + parseInt(limit);
-    const payments = allPayments.slice(start, end);
+    const payments = allPayments.slice(start, end).map(payment => ({
+        id: payment.id,
+        userId: payment.client_id,
+        loanId: payment.loan_id,
+        paymentId: payment.payment_id,
+        amount: payment.amount,
+        method: payment.method,
+        phoneNumber: payment.phone_number,
+        receiptNumber: payment.receipt_number,
+        status: mapPaymentStatus(payment.status === 'completed' ? 2 : 0),
+        processedAt: dateToTimestamp(payment.processed_at),
+        failureReason: null,
+        createdAt: dateToTimestamp(payment.created_at),
+        principal: payment.principal || null,
+        interest: payment.interest || null,
+        penalties: payment.penalties || null,
+        updatedAt: dateToTimestamp(payment.processed_at)
+    }));
 
     res.status(200).json({
         payments,
-        current_page: parseInt(page),
-        total_pages: Math.ceil(allPayments.length / limit),
-        total_count: allPayments.length,
-        has_next: end < allPayments.length,
-        has_previous: page > 1
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(allPayments.length / limit),
+        totalCount: allPayments.length,
+        hasNext: end < allPayments.length,
+        hasPrevious: page > 1
     });
 });
 
@@ -409,13 +736,13 @@ server.get('/api/payments/methods', (req, res) => {
             {
                 id: 'ecocash',
                 name: 'EcoCash',
-                type: 'mobile_money',
-                provider: 'Econet',
-                is_available: true,
-                minimum_amount: 1.0,
-                maximum_amount: 500000.0,
-                transaction_fee: 0.0,
-                processing_time: '2-5 minutes'
+                type: 'ECOCASH',
+                description: 'Econet',
+                isActive: true,
+                minimumAmount: 1.0,
+                maximumAmount: 500000.0,
+                fees: 0.0,
+                processingTime: '2-5 minutes'
             }
         ]
     });
@@ -423,9 +750,9 @@ server.get('/api/payments/methods', (req, res) => {
 
 // Process payment
 server.post('/api/payments/process', (req, res) => {
-    const { loan_id, amount, payment_method, phone_number } = req.body;
+    const { loanId, amount, paymentMethod, phoneNumber } = req.body;
 
-    if (!loan_id || !amount || !payment_method || !phone_number) {
+    if (!loanId || !amount || !paymentMethod || !phoneNumber) {
         return res.status(400).json({
             error: 'Validation Error',
             message: 'All payment fields are required'
@@ -436,11 +763,12 @@ server.post('/api/payments/process', (req, res) => {
     const receiptNumber = `REC${Date.now()}`;
 
     res.status(200).json({
-        payment_id: paymentId,
-        receipt_number: receiptNumber,
-        status: 'processing',
+        paymentId: paymentId,
+        receiptNumber: receiptNumber,
+        status: 'PROCESSING',
         message: 'Payment is being processed. Please wait 2-5 minutes.',
-        estimated_completion: new Date(Date.now() + 180000).toISOString()
+        transactionReference: `TXN${Date.now()}`,
+        estimatedProcessingTime: '2-5 minutes'
     });
 });
 
@@ -457,22 +785,25 @@ server.get('/api/payments/:paymentId/status', (req, res) => {
     }
 
     res.status(200).json({
-        payment_id: payment.payment_id,
-        status: payment.status,
-        amount: payment.amount,
-        receipt_number: payment.receipt_number,
-        processed_at: payment.processed_at
+        paymentId: payment.payment_id,
+        status: mapPaymentStatus(payment.status === 'completed' ? 2 : 0),
+        message: 'Payment completed successfully',
+        receiptNumber: payment.receipt_number,
+        failureReason: null,
+        updatedAt: dateToTimestamp(payment.processed_at)
     });
 });
 
 // Download receipt
 server.get('/api/payments/receipt/:receiptNumber', (req, res) => {
     res.status(200).json({
-        receipt_number: req.params.receiptNumber,
-        download_url: `http://localhost:8080/receipts/${req.params.receiptNumber}.pdf`,
+        receiptNumber: req.params.receiptNumber,
+        downloadUrl: `http://localhost:8080/receipts/${req.params.receiptNumber}.pdf`,
         message: 'Receipt ready for download'
     });
 });
+
+// ========== NOTIFICATION ENDPOINTS ==========
 
 // Get notifications
 server.get('/api/notifications', (req, res) => {
@@ -492,10 +823,10 @@ server.get('/api/notifications', (req, res) => {
 
     res.status(200).json({
         notifications: paginatedNotifications,
-        current_page: parseInt(page),
-        total_pages: Math.ceil(notifications.length / limit),
-        total_count: notifications.length,
-        unread_count: notifications.filter(n => !n.is_read).length
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(notifications.length / limit),
+        totalCount: notifications.length,
+        unreadCount: notifications.filter(n => !n.is_read).length
     });
 });
 
@@ -556,7 +887,7 @@ server.get('/api/notifications/unread/count', (req, res) => {
     const unreadCount = db.get('notifications').filter({ is_read: false }).size().value();
 
     res.status(200).json({
-        unread_count: unreadCount
+        unreadCount: unreadCount
     });
 });
 
